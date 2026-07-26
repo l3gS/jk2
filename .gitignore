@@ -1,0 +1,10 @@
+node_modules/
+dist/
+attached_assets/
+public/uploads/
+public/gallery/
+.local/
+.canvas/
+.agents/
+data/x-auth.json
+data/goonit_db.json

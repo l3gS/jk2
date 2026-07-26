@@ -1,0 +1,6 @@
+- [LunarAI API](lunar-ai-api.md) — pollinations.ai "evil" model for NSFW; mistral fallback; visible ⚡/🌙 toggle in status bar
+- [PasswordGate redesign](passwordgate-redesign.md) — PasswordGate is the actual first-seen screen (age in localStorage skips AgeGate); redesigned with corner brackets, grid, particles, scan intro
+- [Mainframe tab](mainframe-tab.md) — "mainframe" tab; LunarMainframe.tsx; full-canvas video/image overlays; access control (nacre only); profile commands; splash screen added
+- [GIF vision API limit](gif-vision.md) — xAI vision API rejects GIFs (400 invalid-content-type); GIF nodes fall back to text-only grok describe; only PNG/JPG nodes use vision endpoint
+- [Splash screen](splash-screen.md) — SplashScreen.tsx shows "CUM 'N' GO" once per session (sessionStorage key cng-splash-v1); gates before PasswordGate; corner brackets + scan + grid aesthetic
+- [LunarAI commands](lunar-ai-commands.md) — full command list, page context, in-chat video/image embeds, TAKEOVER sequence, pause/download events

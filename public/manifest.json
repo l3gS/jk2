@@ -1,0 +1,16 @@
+{
+  "name": "GoonIt",
+  "short_name": "GoonIt",
+  "description": "Your personal 18+ gooner paradise.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#000000",
+  "theme_color": "#ff3ea5",
+  "icons": [
+    { "src": "/logo.jpg", "sizes": "180x180", "type": "image/jpeg", "purpose": "any maskable" },
+    { "src": "/favicon.svg", "sizes": "any",    "type": "image/svg+xml" }
+  ],
+  "categories": ["entertainment"],
+  "lang": "en"
+}

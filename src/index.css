@@ -1,0 +1,405 @@
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 340 30% 4%;
+    --foreground: 0 0% 100%;
+    --card: 340 25% 8%;
+    --card-foreground: 0 0% 100%;
+    --popover: 340 25% 8%;
+    --popover-foreground: 0 0% 100%;
+    --primary: 330 100% 80%;
+    --primary-foreground: 330 60% 15%;
+    --secondary: 340 20% 12%;
+    --secondary-foreground: 0 0% 100%;
+    --muted: 340 15% 16%;
+    --muted-foreground: 330 20% 65%;
+    --accent: 330 100% 80%;
+    --accent-foreground: 330 60% 15%;
+    --destructive: 330 100% 60%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 330 20% 18%;
+    --input: 330 20% 14%;
+    --ring: 330 100% 80%;
+    --radius: 0.625rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-xgrab-black text-xgrab-white font-body antialiased;
+    overflow-x: hidden;
+    /* The pink heart IS the cursor — replaces the OS arrow site-wide.
+       Hotspot is anchored at the little SPARKLE/STAR at the top-left
+       of the artwork (~x=4, y=2 in the 32×32 PNG) so the click point
+       lines up with the visible peak of the cursor instead of the
+       middle of the heart body. PNG falls back to the system arrow on
+       devices that block custom cursors. */
+    cursor: url('/gallery/cursor-32.png') 4 2, auto;
+  }
+  /* Same heart for clickable elements — same peak hotspot so clicks
+     land exactly where the user is aiming. */
+  a, button, [role="button"], select, summary, label[for], .cursor-pointer {
+    cursor: url('/gallery/cursor-32.png') 4 2, pointer;
+  }
+  /* Keep the I-beam where typing makes sense. */
+  input, textarea, [contenteditable="true"] {
+    cursor: text;
+  }
+
+  ::selection {
+    background: rgba(255, 182, 217, 0.4);
+    color: white;
+  }
+}
+
+@layer components {
+  .text-gradient {
+    background: linear-gradient(135deg, #ffffff 0%, #a0a0a0 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  
+  .text-gradient-red {
+    background: linear-gradient(135deg, #ffb6d9 0%, #ff6eb4 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  
+  .glass-card {
+    background: rgba(20, 8, 15, 0.85);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 182, 217, 0.12);
+  }
+  
+  .glow-border {
+    position: relative;
+  }
+  
+  .glow-border::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    background: linear-gradient(135deg, rgba(255, 182, 217, 0.5), transparent, rgba(255, 110, 180, 0.3));
+    border-radius: inherit;
+    z-index: -1;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+  }
+  
+  .glow-border:hover::before {
+    opacity: 1;
+  }
+  
+  .magnetic-btn {
+    transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  
+  .input-glow:focus {
+    box-shadow: 0 0 30px rgba(255, 182, 217, 0.35);
+  }
+  
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+  
+  .grain-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 9999;
+    opacity: 0.03;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  }
+  
+  .tilt-card {
+    transform-style: preserve-3d;
+    perspective: 1000px;
+  }
+  
+  .underline-expand {
+    position: relative;
+  }
+  
+  .underline-expand::after {
+    content: '';
+    position: absolute;
+    bottom: -2px;
+    left: 50%;
+    width: 0;
+    height: 1px;
+    background: currentColor;
+    transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    transform: translateX(-50%);
+  }
+  
+  .underline-expand:hover::after {
+    width: 100%;
+  }
+  
+  .video-card {
+    transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  
+  .video-card:hover {
+    transform: translateY(-8px) scale(1.02);
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+  }
+  
+  .profile-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1.5rem;
+  }
+  
+  .age-checkbox {
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-radius: 4px;
+    background: transparent;
+    cursor: pointer;
+    position: relative;
+    transition: all 0.2s ease;
+  }
+  
+  .age-checkbox:checked {
+    background: #ff6eb4;
+    border-color: #ff6eb4;
+  }
+  
+  .age-checkbox:checked::after {
+    content: '✓';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: white;
+    font-size: 12px;
+    font-weight: bold;
+  }
+  
+  .loading-spinner {
+    width: 24px;
+    height: 24px;
+    border: 2px solid rgba(255, 182, 217, 0.15);
+    border-top-color: #ffb6d9;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  
+  .progress-bar {
+    height: 4px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  
+  .progress-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #ffb6d9, #ff6eb4);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+  
+  .vault-item {
+    animation: slide-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+  
+  .tab-active {
+    position: relative;
+  }
+  
+  .tab-active::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 0;
+    width: 100%;
+    height: 2px;
+    background: #ffb6d9;
+  }
+}
+
+@layer utilities {
+  .animation-delay-100 {
+    animation-delay: 100ms;
+  }
+  .animation-delay-200 {
+    animation-delay: 200ms;
+  }
+  .animation-delay-300 {
+    animation-delay: 300ms;
+  }
+  .animation-delay-400 {
+    animation-delay: 400ms;
+  }
+  .animation-delay-500 {
+    animation-delay: 500ms;
+  }
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-8px); }
+  40% { transform: translateX(8px); }
+  60% { transform: translateX(-6px); }
+  80% { transform: translateX(6px); }
+}
+.animate-shake {
+  animation: shake 0.5s ease-in-out;
+}
+
+/* Floating chat bubble (KinkyChatBubbles) — slides in from the right with
+   a soft pop, plus a left-to-right progress bar that depletes during the
+   bubble's auto-dismiss window. */
+@keyframes bubble-in {
+  0%   { opacity: 0; transform: translateX(28px) scale(0.92); }
+  60%  { opacity: 1; transform: translateX(-3px) scale(1.02); }
+  100% { opacity: 1; transform: translateX(0) scale(1); }
+}
+.animate-bubble-in {
+  animation: bubble-in 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes bubble-progress {
+  0%   { width: 100%; }
+  100% { width: 0%; }
+}
+.animate-bubble-progress {
+  animation-name: bubble-progress;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
+/* Scattered hentai gifs — gentle bob/sway loop. The translate keeps the
+   card moving so the page never feels static, but it's slow and small so
+   it doesn't pull focus from real content. */
+@keyframes gif-bob {
+  0%   { transform: rotate(var(--rot, 0deg)) translateY(0); }
+  50%  { transform: rotate(var(--rot, 0deg)) translateY(-6px); }
+  100% { transform: rotate(var(--rot, 0deg)) translateY(0); }
+}
+.animate-gif-bob {
+  animation: gif-bob 6s ease-in-out infinite;
+}
+
+/* SamHub kink-page effects ─────────────────────────────────────── */
+
+/* Slow, breathy pulse for the hero aura blobs and big watermark heart. */
+@keyframes pulse-slow {
+  0%, 100% { opacity: 0.5; transform: scale(1); }
+  50%      { opacity: 0.85; transform: scale(1.06); }
+}
+.animate-pulse-slow {
+  animation: pulse-slow 4.5s ease-in-out infinite;
+}
+
+/* Lip-bite emoji wiggle next to the "HI {NAME}" headline — small head
+   tilt + scale on a loop so the kiss looks alive. */
+@keyframes lip-bite {
+  0%, 100% { transform: rotate(0deg) scale(1); }
+  20%      { transform: rotate(-12deg) scale(1.15); }
+  40%      { transform: rotate(8deg) scale(1.1); }
+  60%      { transform: rotate(-6deg) scale(1.08); }
+  80%      { transform: rotate(4deg) scale(1.05); }
+}
+.animate-lip-bite {
+  display: inline-block;
+  transform-origin: bottom center;
+  animation: lip-bite 3.5s ease-in-out infinite;
+}
+
+/* Background kiss marks gently drifting and fading. */
+@keyframes kiss-drift {
+  0%, 100% { transform: translateY(0) rotate(var(--rot, 0deg)); opacity: var(--op, 0.1); }
+  50%      { transform: translateY(-10px) rotate(var(--rot, 0deg)); opacity: calc(var(--op, 0.1) * 1.5); }
+}
+.animate-kiss-drift {
+  animation: kiss-drift 7s ease-in-out infinite;
+}
+
+/* Climax overlay — pink flash that fades out over the duration of the
+   reveal, paired with a pulse on the heart + line of dialogue. */
+@keyframes climax-flash {
+  0%   { opacity: 0; }
+  15%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+.animate-climax-flash {
+  animation: climax-flash 4.5s ease-out forwards;
+}
+@keyframes climax-pulse {
+  0%   { opacity: 0; transform: scale(0.7); }
+  20%  { opacity: 1; transform: scale(1.1); }
+  60%  { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(0.95); }
+}
+.animate-climax-pulse {
+  animation: climax-pulse 4.5s ease-out forwards;
+}
+
+/* ── LUNAR AI animations ── */
+@keyframes lunarWave {
+  0%   { height: 4px; }
+  100% { height: 20px; }
+}
+@keyframes lunarOrbIdle {
+  0%, 100% { opacity: 0.7; transform: scale(1); }
+  50%       { opacity: 1;   transform: scale(1.12); }
+}
+@keyframes lunarOrbPulse {
+  0%, 100% { opacity: 0.9; transform: scale(1); box-shadow: 0 0 20px rgba(140,80,255,0.5); }
+  50%      { opacity: 1;   transform: scale(1.2); box-shadow: 0 0 40px rgba(140,80,255,0.8); }
+}
+@keyframes lunarBtnPulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(140,80,255,0.15), 0 4px 20px rgba(0,0,0,0.6); }
+  50%      { box-shadow: 0 0 0 4px rgba(140,80,255,0.25), 0 4px 24px rgba(140,80,255,0.3); }
+}
+
+/* ── Creamy Spot dominance overlay ── */
+@keyframes csOwnPulse {
+  0%, 100% { opacity: 0.9; transform: scale(1); }
+  50%      { opacity: 1;   transform: scale(1.025); }
+}
+@keyframes csOwnFade {
+  0%   { opacity: 0; transform: translateY(6px); }
+  10%  { opacity: 1; transform: translateY(0); }
+  85%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* ── Home page interactive stats strip ── */
+@keyframes statCount {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.stat-card {
+  animation: statCount 0.5s ease-out both;
+}
