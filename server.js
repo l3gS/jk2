@@ -1050,6 +1050,32 @@ app.get('/api/ph-keyword-search', async (req, res) => {
   }
 });
 
+// GET /api/ph-stream?viewkey=<viewkey>
+// Returns actual HLS stream URL for a PornHub video — uses ScraperAPI to bypass Cloudflare.
+const phStreamCache = new Map();
+const PH_STREAM_TTL = 25 * 60 * 1000; // 25 min (streams expire ~30 min)
+app.get('/api/ph-stream', async (req, res) => {
+  const viewkey = (req.query.viewkey || '').toString().trim().replace(/[^a-z0-9ph]/gi, '').slice(0, 60);
+  if (!viewkey) return res.status(400).json({ error: 'viewkey required' });
+  const cacheKey = viewkey;
+  const cached = phStreamCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < PH_STREAM_TTL) {
+    return res.json({ streamUrl: cached.streamUrl, title: cached.title, thumbnail: cached.thumbnail, cached: true });
+  }
+  try {
+    const pageUrl = `https://www.pornhub.com/view_video.php?viewkey=${viewkey}`;
+    const info = await fetchPornhub(pageUrl);
+    const streamUrl = info.mediaURLs?.[0];
+    if (!streamUrl) return res.status(502).json({ error: 'No stream found for this video' });
+    const result = { streamUrl, title: info.text || 'Video', thumbnail: info.media_extended?.[0]?.thumbnail_url || '' };
+    phStreamCache.set(cacheKey, { ts: Date.now(), ...result });
+    res.json(result);
+  } catch (err) {
+    console.error('ph-stream error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────────
 // Pornhub model channel scraper — uses ScraperAPI to bypass Cloudflare
 // and extract videos from https://www.pornhub.com/model/{slug}/videos
@@ -1394,20 +1420,7 @@ app.get("/api/xvsearch", async (req, res) => {
     const query = q && q.trim() ? q.trim() : "creamyspot";
     const searchUrl = `https://www.xvideos.com/?k=${encodeURIComponent(query)}&sort=relevance`;
 
-    const resp = await fetch(searchUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        Referer: "https://www.xvideos.com/",
-      },
-      signal: AbortSignal.timeout(12000),
-    });
-    if (!resp.ok)
-      return res.status(502).json({ error: `Search returned ${resp.status}` });
-    const html = await resp.text();
+    const html = await crawlUrl(searchUrl);
 
     const results = [];
     const seen = new Set();

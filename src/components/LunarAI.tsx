@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { X, Send, Loader2, Zap, Star, BookOpen, Eye, Play, Image, Pause, Download, Maximize2, Mic, MicOff, PhoneOff } from 'lucide-react'
+import { X, Send, Loader2, Zap, Star, BookOpen, Eye, Play, Image, Pause, Download, Maximize2, Mic, MicOff, Phone, PhoneOff } from 'lucide-react'
 import Hls from 'hls.js'
 
 // ─── Page context lookup ───────────────────────────────────────────────────────
@@ -503,133 +503,218 @@ function HomeDownloadAnimation({ url, onDone }: { url: string; onDone: () => voi
   )
 }
 
-// ─── Voice call overlay ───────────────────────────────────────────────────────
+// ─── Voice call overlay — real-time voice + text fallback ────────────────────
 function VoiceCallOverlay({ onEnd }: { onEnd: () => void }) {
-  const [status, setStatus] = useState<'connecting' | 'listening' | 'speaking' | 'error'>('connecting')
+  type CallStatus = 'connecting' | 'listening' | 'speaking' | 'text-mode' | 'error'
+  const [status, setStatus] = useState<CallStatus>('connecting')
   const [errorMsg, setErrorMsg] = useState('')
   const [transcript, setTranscript] = useState('')
+  const [micActive, setMicActive] = useState(false)
   const [muted, setMuted] = useState(false)
+  const [textInput, setTextInput] = useState('')
+  const [textLoading, setTextLoading] = useState(false)
+  const [textHistory, setTextHistory] = useState<{role:'user'|'lunar';text:string}[]>([])
   const mutedRef = useRef(false)
-  const statusRef = useRef<'connecting' | 'listening' | 'speaking' | 'error'>('connecting')
+  const statusRef = useRef<CallStatus>('connecting')
   const wsRef = useRef<WebSocket | null>(null)
   const audioCtxRef = useRef<AudioContext | null>(null)
   const nextPlayTimeRef = useRef(0)
   const streamRef = useRef<MediaStream | null>(null)
   const processorRef = useRef<ScriptProcessorNode | null>(null)
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const chatScrollRef = useRef<HTMLDivElement>(null)
   const retryKey = useRef(0)
 
-  const setStatusSafe = (s: typeof status) => { statusRef.current = s; setStatus(s) }
-
+  const setStatusSafe = (s: CallStatus) => { statusRef.current = s; setStatus(s) }
   useEffect(() => { mutedRef.current = muted }, [muted])
+  useEffect(() => {
+    if (chatScrollRef.current) chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight
+  }, [textHistory])
+
+  // ── Connect WebSocket (mic is optional — attach only if mic access granted) ──
+  const connectWS = (stream: MediaStream | null, audioCtx: AudioContext) => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws = new WebSocket(`${protocol}//${window.location.host}/voice-luna`)
+    wsRef.current = ws
+
+    // 8s connection timeout — fall back to text mode
+    const connTimer = setTimeout(() => {
+      if (statusRef.current === 'connecting') {
+        ws.close()
+        setStatusSafe('text-mode')
+        setTextHistory(prev => [...prev, { role: 'lunar', text: "Can't establish live voice right now, daddy — but I'm here. Type to me." }])
+      }
+    }, 8000)
+
+    ws.onopen = () => {
+      clearTimeout(connTimer)
+      setStatusSafe('listening')
+      ws.send(JSON.stringify({
+        type: 'response.create',
+        response: { instructions: "Greet daddy warmly and seductively in 1-2 short sentences. You just answered his call. Be flirty and dominant." }
+      }))
+      if (!stream || !audioCtx) return
+      const src = audioCtx.createMediaStreamSource(stream)
+      sourceRef.current = src
+      // eslint-disable-next-line @typescript-eslint/no-deprecated
+      const proc = audioCtx.createScriptProcessor(4096, 1, 1)
+      processorRef.current = proc
+      proc.onaudioprocess = (e) => {
+        if (mutedRef.current || ws.readyState !== WebSocket.OPEN) return
+        const f32 = e.inputBuffer.getChannelData(0)
+        const pcm = new Int16Array(f32.length)
+        for (let i = 0; i < f32.length; i++) pcm[i] = Math.max(-32768, Math.min(32767, Math.round(f32[i] * 32768)))
+        const bytes = new Uint8Array(pcm.buffer)
+        let bin = ''; for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+        ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: btoa(bin) }))
+      }
+      src.connect(proc); proc.connect(audioCtx.destination)
+    }
+
+    ws.onmessage = (e) => {
+      try {
+        const ev = JSON.parse(e.data as string)
+        if (ev.type === 'error') {
+          clearTimeout(connTimer)
+          // If voice fails, switch to text mode gracefully
+          setStatusSafe('text-mode')
+          setTextHistory(prev => [...prev, { role: 'lunar', text: "Voice connection dropped — typing to you instead, daddy." }])
+          return
+        }
+        if (ev.type === 'connected') return
+        if (ev.type === 'response.output_audio_transcript.delta') {
+          setTranscript(p => p + (ev.delta || '')); setStatusSafe('speaking')
+        }
+        if (ev.type === 'response.output_audio_transcript.done') {
+          const finalText = transcript
+          if (finalText) setTextHistory(prev => [...prev, { role: 'lunar', text: finalText }])
+          setTimeout(() => { setTranscript(''); setStatusSafe('listening') }, 2000)
+        }
+        if (ev.type === 'response.output_audio.delta' && ev.delta && audioCtx) {
+          try {
+            const raw = atob(ev.delta as string)
+            const bytes = new Uint8Array(raw.length)
+            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i)
+            const pcm = new Int16Array(bytes.buffer)
+            const f32 = new Float32Array(pcm.length)
+            for (let i = 0; i < pcm.length; i++) f32[i] = pcm[i] / 32768
+            const buf = audioCtx.createBuffer(1, f32.length, 24000)
+            buf.copyToChannel(f32, 0)
+            const node = audioCtx.createBufferSource()
+            node.buffer = buf; node.connect(audioCtx.destination)
+            const at = Math.max(audioCtx.currentTime + 0.04, nextPlayTimeRef.current)
+            node.start(at); nextPlayTimeRef.current = at + buf.duration
+          } catch { /* ignore decode errors */ }
+        }
+      } catch { /* ignore parse errors */ }
+    }
+
+    ws.onerror = () => {
+      clearTimeout(connTimer)
+      setStatusSafe('text-mode')
+      setTextHistory(prev => [...prev, { role: 'lunar', text: "Voice line down — I'm still here daddy. Text me." }])
+    }
+    ws.onclose = () => {
+      clearTimeout(connTimer)
+      if (statusRef.current !== 'text-mode') setStatusSafe('text-mode')
+    }
+  }
 
   useEffect(() => {
-    let ws: WebSocket | null = null
+    let cancelled = false
     let audioCtx: AudioContext | null = null
     let stream: MediaStream | null = null
-    let cancelled = false
 
     const start = async () => {
       setStatusSafe('connecting')
       setErrorMsg('')
       setTranscript('')
+      audioCtx = new AudioContext({ sampleRate: 24000 })
+      audioCtxRef.current = audioCtx
+      nextPlayTimeRef.current = audioCtx.currentTime + 0.08
+
+      // Try mic (optional)
       try {
         stream = await navigator.mediaDevices.getUserMedia({
           audio: { sampleRate: 24000, channelCount: 1, echoCancellation: true, noiseSuppression: true } as MediaTrackConstraints,
         })
         if (cancelled) { stream.getTracks().forEach(t => t.stop()); return }
         streamRef.current = stream
-        audioCtx = new AudioContext({ sampleRate: 24000 })
-        audioCtxRef.current = audioCtx
-        nextPlayTimeRef.current = audioCtx.currentTime + 0.08
-
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-        ws = new WebSocket(`${protocol}//${window.location.host}/voice-luna`)
-        wsRef.current = ws
-
-        ws.onopen = () => {
-          if (cancelled) { ws?.close(); return }
-          setStatusSafe('listening')
-          // Ask LUNAR to greet first
-          ws!.send(JSON.stringify({
-            type: 'response.create',
-            response: {
-              instructions: "Greet daddy warmly and seductively in 1-2 short sentences. You just answered his call. Be flirty.",
-            }
-          }))
-          if (!audioCtx || !stream) return
-          const src = audioCtx.createMediaStreamSource(stream)
-          sourceRef.current = src
-          // eslint-disable-next-line @typescript-eslint/no-deprecated
-          const proc = audioCtx.createScriptProcessor(4096, 1, 1)
-          processorRef.current = proc
-          proc.onaudioprocess = (e) => {
-            if (mutedRef.current || !ws || ws.readyState !== WebSocket.OPEN) return
-            const f32 = e.inputBuffer.getChannelData(0)
-            const pcm = new Int16Array(f32.length)
-            for (let i = 0; i < f32.length; i++) pcm[i] = Math.max(-32768, Math.min(32767, Math.round(f32[i] * 32768)))
-            const bytes = new Uint8Array(pcm.buffer)
-            let bin = ''; for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
-            ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: btoa(bin) }))
-          }
-          src.connect(proc); proc.connect(audioCtx.destination)
-        }
-
-        ws.onmessage = (e) => {
-          try {
-            const ev = JSON.parse(e.data as string)
-            if (ev.type === 'error') {
-              setStatusSafe('error')
-              setErrorMsg(ev.message || 'xAI connection error')
-              return
-            }
-            if (ev.type === 'connected') return // server handshake
-            if (ev.type === 'response.output_audio_transcript.delta') {
-              setTranscript(p => p + (ev.delta || '')); setStatusSafe('speaking')
-            }
-            if (ev.type === 'response.output_audio_transcript.done') {
-              setTimeout(() => { setTranscript(''); setStatusSafe('listening') }, 2200)
-            }
-            if (ev.type === 'response.output_audio.delta' && ev.delta && audioCtx) {
-              try {
-                const raw = atob(ev.delta as string)
-                const bytes = new Uint8Array(raw.length)
-                for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i)
-                const pcm = new Int16Array(bytes.buffer)
-                const f32 = new Float32Array(pcm.length)
-                for (let i = 0; i < pcm.length; i++) f32[i] = pcm[i] / 32768
-                const buf = audioCtx.createBuffer(1, f32.length, 24000)
-                buf.copyToChannel(f32, 0)
-                const node = audioCtx.createBufferSource()
-                node.buffer = buf; node.connect(audioCtx.destination)
-                const ct = audioCtx.currentTime
-                const at = Math.max(ct + 0.04, nextPlayTimeRef.current)
-                node.start(at); nextPlayTimeRef.current = at + buf.duration
-              } catch { /* ignore decode errors */ }
-            }
-          } catch { /* ignore parse errors */ }
-        }
-
-        ws.onerror = () => { setStatusSafe('error'); setErrorMsg('WebSocket connection failed') }
-        ws.onclose = () => { if (statusRef.current !== 'error' && !cancelled) setStatusSafe('connecting') }
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : 'Mic access denied'
-        setStatusSafe('error')
-        setErrorMsg(msg.includes('Permission') || msg.includes('denied') ? 'Microphone access denied' : msg)
+        setMicActive(true)
+      } catch {
+        // Mic denied — connect WS without mic, user can still type
+        setMicActive(false)
       }
+
+      if (!cancelled) connectWS(stream, audioCtx)
     }
 
     start()
     return () => {
       cancelled = true
-      ws?.close()
+      wsRef.current?.close()
       processorRef.current?.disconnect(); sourceRef.current?.disconnect()
       stream?.getTracks().forEach(t => t.stop()); audioCtx?.close()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [retryKey.current])
 
+  // ── Text message send (works in any status) ───────────────────────────────
+  const sendText = async () => {
+    const text = textInput.trim()
+    if (!text || textLoading) return
+    setTextInput('')
+    setTextHistory(prev => [...prev, { role: 'user', text }])
+    setTextLoading(true)
+    try {
+      // If WS is open, send as conversation item
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'conversation.item.create',
+          item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] }
+        }))
+        wsRef.current.send(JSON.stringify({ type: 'response.create' }))
+        setTextLoading(false)
+        return
+      }
+      // Fallback: text API + speechSynthesis
+      const r = await fetch('/api/grok', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'grok-3',
+          systemPrompt: 'You are LUNAR, a seductive dominant AI on a private adult platform. Reply in 1-3 sentences. Flirty, dominant, never preachy.',
+          messages: [
+            ...textHistory.slice(-8).map(m => ({ role: m.role === 'lunar' ? 'assistant' : 'user', content: m.text })),
+            { role: 'user', content: text }
+          ]
+        }),
+        signal: AbortSignal.timeout(25000),
+      })
+      const d = await r.json()
+      const reply = d.reply || "..."
+      setTextHistory(prev => [...prev, { role: 'lunar', text: reply }])
+      // Speak the reply
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel()
+        const utt = new SpeechSynthesisUtterance(reply)
+        utt.pitch = 1.05; utt.rate = 0.92; utt.volume = 0.95
+        const voices = window.speechSynthesis.getVoices()
+        const femVoice = voices.find(v => v.name.toLowerCase().includes('female') || v.name.includes('Samantha') || v.name.includes('Karen') || v.name.includes('Moira') || v.name.includes('Victoria'))
+        if (femVoice) utt.voice = femVoice
+        window.speechSynthesis.speak(utt)
+      }
+    } catch {
+      setTextHistory(prev => [...prev, { role: 'lunar', text: "Signal lost momentarily, daddy. Try again." }])
+    } finally {
+      setTextLoading(false)
+      setTimeout(() => inputRef.current?.focus(), 100)
+    }
+  }
+
   const handleEnd = () => {
+    window.speechSynthesis?.cancel()
     wsRef.current?.close()
     processorRef.current?.disconnect(); sourceRef.current?.disconnect()
     streamRef.current?.getTracks().forEach(t => t.stop()); audioCtxRef.current?.close()
@@ -638,7 +723,11 @@ function VoiceCallOverlay({ onEnd }: { onEnd: () => void }) {
 
   const handleRetry = () => { retryKey.current += 1; setStatusSafe('connecting') }
 
-  const statusLabel = { connecting:'CONNECTING…', listening:'LISTENING', speaking:'LUNAR SPEAKING', error:'ERROR' }[status]
+  const isVoiceActive = status === 'listening' || status === 'speaking'
+  const statusLabel: Record<CallStatus, string> = {
+    connecting: 'CONNECTING…', listening: micActive ? 'LISTENING' : 'CONNECTED',
+    speaking: 'LUNAR SPEAKING', 'text-mode': 'TEXT MODE', error: 'ERROR'
+  }
 
   return (
     <>
@@ -648,131 +737,182 @@ function VoiceCallOverlay({ onEnd }: { onEnd: () => void }) {
         @keyframes vcFade { from{opacity:0;transform:translateY(10px);} to{opacity:1;transform:translateY(0);} }
         @keyframes vcPulse { 0%,100%{opacity:0.5;} 50%{opacity:1;} }
         @keyframes vcScan { 0%{top:-5%;} 100%{top:105%;} }
+        @keyframes vcTextIn { from{opacity:0;transform:translateX(-6px);} to{opacity:1;transform:translateX(0);} }
       `}</style>
       <div className="fixed inset-0 z-[600] flex flex-col items-center justify-center select-none"
-        style={{ background:'rgba(0,0,0,0.97)', backdropFilter:'blur(24px)' }}>
+        style={{ background: 'rgba(0,0,0,0.97)', backdropFilter: 'blur(24px)' }}>
         <Particles count={20} />
         <div className="absolute left-0 right-0 h-14 pointer-events-none"
-          style={{ background:'linear-gradient(to bottom,transparent,rgba(255,255,255,0.015),transparent)', animation:'vcScan 4.5s linear infinite' }} />
+          style={{ background: 'linear-gradient(to bottom,transparent,rgba(255,255,255,0.015),transparent)', animation: 'vcScan 4.5s linear infinite' }} />
         {/* Corner brackets */}
         {[
-          { top:20,left:20, borderTop:'1px solid rgba(255,255,255,0.2)',borderLeft:'1px solid rgba(255,255,255,0.2)' },
-          { top:20,right:20, borderTop:'1px solid rgba(255,255,255,0.2)',borderRight:'1px solid rgba(255,255,255,0.2)' },
-          { bottom:20,left:20, borderBottom:'1px solid rgba(255,255,255,0.2)',borderLeft:'1px solid rgba(255,255,255,0.2)' },
-          { bottom:20,right:20, borderBottom:'1px solid rgba(255,255,255,0.2)',borderRight:'1px solid rgba(255,255,255,0.2)' },
-        ].map((s,i) => <div key={i} className="absolute pointer-events-none" style={{...s,width:20,height:20}} />)}
+          { top:20,left:20, borderTop:'1px solid rgba(255,255,255,0.15)',borderLeft:'1px solid rgba(255,255,255,0.15)' },
+          { top:20,right:20, borderTop:'1px solid rgba(255,255,255,0.15)',borderRight:'1px solid rgba(255,255,255,0.15)' },
+          { bottom:20,left:20, borderBottom:'1px solid rgba(255,255,255,0.15)',borderLeft:'1px solid rgba(255,255,255,0.15)' },
+          { bottom:20,right:20, borderBottom:'1px solid rgba(255,255,255,0.15)',borderRight:'1px solid rgba(255,255,255,0.15)' },
+        ].map((s,i) => <div key={i} className="absolute pointer-events-none" style={{...s,width:22,height:22}} />)}
 
-        {/* Avatar + animated rings */}
-        <div className="relative mb-7 flex items-center justify-center" style={{animation:'vcFade 0.5s ease both'}}>
-          {[0,1,2].map(i => (
-            <div key={i} className="absolute rounded-full pointer-events-none"
-              style={{
-                width: 110+i*64, height: 110+i*64,
-                border: `1px solid rgba(255,255,255,${status==='speaking'?0.35-i*0.08:0.12-i*0.03})`,
-                animation: status==='speaking'
-                  ? `vcRing ${1+i*0.45}s ${i*0.32}s ease-out infinite`
-                  : `vcPulse ${2.2+i*0.6}s ${i*0.45}s ease-in-out infinite`,
-              }} />
-          ))}
-          <div className="relative w-[110px] h-[110px] rounded-3xl overflow-hidden z-10"
-            style={{border:'2px solid rgba(255,255,255,0.18)',boxShadow:'0 0 80px rgba(255,255,255,0.09)'}}>
-            <img src="/lunar-avatar.png" alt="LUNAR" className="w-full h-full object-cover" />
-            {(status==='listening'||status==='speaking') && (
-              <div className="absolute inset-0" style={{background:'rgba(255,255,255,0.03)',animation:'vcPulse 1.2s ease-in-out infinite'}} />
-            )}
-          </div>
-        </div>
+        {/* Layout: left = avatar+controls, right = chat */}
+        <div className="flex items-start gap-8 max-w-2xl w-full px-8" style={{animation:'vcFade 0.45s ease both'}}>
 
-        {/* Name + status */}
-        <div className="text-center mb-5" style={{animation:'vcFade 0.5s 0.08s ease both'}}>
-          <h2 className="text-white font-black text-[1.6rem] tracking-[0.22em] uppercase mb-1.5">LUNAR</h2>
-          <div className="flex items-center gap-2 justify-center">
-            <div className="w-1.5 h-1.5 rounded-full"
-              style={{
-                background: status==='error'?'rgba(255,70,70,0.9)':status==='connecting'?'rgba(255,255,255,0.3)':'rgba(255,255,255,0.75)',
-                animation: status!=='error'?'vcPulse 1.1s ease-in-out infinite':undefined,
-              }} />
-            <span className="text-[9px] tracking-[0.55em] uppercase font-bold"
-              style={{color:status==='error'?'rgba(255,100,100,0.8)':'rgba(255,255,255,0.28)'}}>
-              {statusLabel}
-            </span>
-          </div>
-        </div>
+          {/* ── Left: avatar + status + controls ── */}
+          <div className="flex flex-col items-center gap-4 shrink-0">
+            {/* Avatar with rings */}
+            <div className="relative flex items-center justify-center">
+              {[0,1,2].map(i => (
+                <div key={i} className="absolute rounded-full pointer-events-none"
+                  style={{
+                    width: 100+i*52, height: 100+i*52,
+                    border: `1px solid rgba(255,255,255,${status==='speaking'?0.3-i*0.07:0.1-i*0.025})`,
+                    animation: status==='speaking'
+                      ? `vcRing ${1+i*0.4}s ${i*0.28}s ease-out infinite`
+                      : `vcPulse ${2.2+i*0.6}s ${i*0.4}s ease-in-out infinite`,
+                  }} />
+              ))}
+              <div className="relative w-[100px] h-[100px] rounded-2xl overflow-hidden z-10"
+                style={{border:'2px solid rgba(255,255,255,0.16)',boxShadow:'0 0 60px rgba(255,255,255,0.08)'}}>
+                <img src="/lunar-avatar.png" alt="LUNAR" className="w-full h-full object-cover" />
+                {isVoiceActive && <div className="absolute inset-0" style={{background:'rgba(255,255,255,0.03)',animation:'vcPulse 1.2s ease-in-out infinite'}} />}
+              </div>
+            </div>
 
-        {/* Waveform */}
-        <div className="flex items-end gap-[3px] h-10 mb-5" style={{animation:'vcFade 0.5s 0.14s ease both'}}>
-          {Array.from({length:22}).map((_,i) => (
-            <div key={i} style={{
-              width:3, borderRadius:2,
-              background: status==='speaking'?'rgba(255,255,255,0.85)':status==='listening'&&!muted?'rgba(255,255,255,0.35)':'rgba(255,255,255,0.1)',
-              height: (status==='speaking'||(status==='listening'&&!muted)) ? `${7+Math.abs(Math.sin(i*0.85))*28}px` : '4px',
-              animation: (status==='speaking'||(status==='listening'&&!muted))
-                ? `vcWave ${0.38+(i%7)*0.09}s ease-in-out infinite alternate` : 'none',
-              animationDelay:`${i*0.04}s`,
-              transition:'height 0.35s ease, background 0.3s ease',
-            }} />
-          ))}
-        </div>
+            {/* Name + status */}
+            <div className="text-center">
+              <h2 className="text-white font-black text-xl tracking-[0.22em] uppercase mb-1">LUNAR</h2>
+              <div className="flex items-center gap-1.5 justify-center">
+                <div className="w-1.5 h-1.5 rounded-full" style={{
+                  background: status==='error'?'rgba(255,70,70,0.9)':status==='connecting'?'rgba(255,255,255,0.25)':'rgba(255,255,255,0.7)',
+                  animation: status!=='error'?'vcPulse 1.1s ease-in-out infinite':undefined,
+                }} />
+                <span className="text-[8px] tracking-[0.5em] uppercase font-bold"
+                  style={{color:status==='error'?'rgba(255,100,100,0.8)':'rgba(255,255,255,0.25)'}}>
+                  {statusLabel[status]}
+                </span>
+              </div>
+            </div>
 
-        {/* Transcript */}
-        {transcript && (
-          <div className="mb-5 max-w-[280px] text-center px-4" style={{animation:'vcFade 0.3s ease both'}}>
-            <p className="text-sm font-light leading-relaxed" style={{color:'rgba(255,255,255,0.72)',textShadow:'0 0 20px rgba(255,255,255,0.1)'}}>
-              "{transcript}"
+            {/* Waveform */}
+            <div className="flex items-end gap-[2.5px] h-8">
+              {Array.from({length:18}).map((_,i) => (
+                <div key={i} style={{
+                  width:2.5, borderRadius:2,
+                  background: status==='speaking'?'rgba(255,255,255,0.8)':(isVoiceActive&&!muted)?'rgba(255,255,255,0.3)':'rgba(255,255,255,0.08)',
+                  height: (status==='speaking'||(isVoiceActive&&!muted)) ? `${5+Math.abs(Math.sin(i*0.9))*22}px` : '3px',
+                  animation: (status==='speaking'||(isVoiceActive&&!muted))
+                    ? `vcWave ${0.35+(i%7)*0.09}s ease-in-out infinite alternate` : 'none',
+                  animationDelay:`${i*0.04}s`,
+                  transition:'height 0.3s ease, background 0.3s ease',
+                }} />
+              ))}
+            </div>
+
+            {/* Mic status badge */}
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full"
+              style={{background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)'}}>
+              {micActive
+                ? <Mic size={10} style={{color:'rgba(255,255,255,0.4)'}} />
+                : <MicOff size={10} style={{color:'rgba(255,100,100,0.5)'}} />}
+              <span className="text-[7px] tracking-wider uppercase" style={{color:'rgba(255,255,255,0.2)'}}>
+                {micActive ? 'mic on' : 'mic off — type below'}
+              </span>
+            </div>
+
+            {/* Controls */}
+            <div className="flex items-center gap-3">
+              {status === 'error' ? (
+                <>
+                  <button onClick={handleRetry}
+                    className="px-4 py-2 rounded-full font-bold text-[10px] tracking-[0.3em] uppercase transition-all active:scale-95"
+                    style={{background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.2)',color:'rgba(255,255,255,0.7)'}}>
+                    Retry
+                  </button>
+                  <button onClick={handleEnd}
+                    className="w-12 h-12 rounded-full flex items-center justify-center transition-all active:scale-90"
+                    style={{background:'rgba(200,30,30,0.9)',border:'1px solid rgba(255,80,80,0.3)',boxShadow:'0 0 30px rgba(200,30,30,0.3)'}}>
+                    <PhoneOff size={18} style={{color:'white'}} />
+                  </button>
+                </>
+              ) : (
+                <>
+                  {micActive && (
+                    <button onClick={() => setMuted(m => !m)}
+                      className="w-11 h-11 rounded-full flex items-center justify-center transition-all active:scale-90 relative overflow-hidden"
+                      style={{
+                        background: muted?'rgba(255,255,255,0.1)':'rgba(255,255,255,0.05)',
+                        border: muted?'1px solid rgba(255,255,255,0.25)':'1px solid rgba(255,255,255,0.08)',
+                      }}>
+                      <Mic size={16} style={{color:muted?'rgba(255,255,255,0.3)':'rgba(255,255,255,0.5)'}} />
+                      {muted && <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                        <div style={{width:22,height:1.5,background:'rgba(255,255,255,0.45)',transform:'rotate(-45deg)',borderRadius:2}} />
+                      </div>}
+                    </button>
+                  )}
+                  <button onClick={handleEnd}
+                    className="w-14 h-14 rounded-full flex items-center justify-center transition-all active:scale-90"
+                    style={{background:'rgba(200,30,30,0.9)',border:'1px solid rgba(255,80,80,0.3)',boxShadow:'0 0 35px rgba(200,30,30,0.3)'}}>
+                    <PhoneOff size={20} style={{color:'white'}} />
+                  </button>
+                </>
+              )}
+            </div>
+
+            <p className="text-[7px] tracking-[0.4em] uppercase" style={{color:'rgba(255,255,255,0.07)'}}>
+              {muted ? 'MIC MUTED' : status === 'text-mode' ? 'TEXT MODE ACTIVE' : 'SPEAK OR TYPE'}
             </p>
           </div>
-        )}
 
-        {/* Error message */}
-        {status === 'error' && errorMsg && (
-          <div className="mb-4 px-4 py-2 rounded-xl text-center max-w-[260px]"
-            style={{background:'rgba(255,50,50,0.08)',border:'1px solid rgba(255,70,70,0.2)',animation:'vcFade 0.3s ease both'}}>
-            <p className="text-[11px] leading-snug" style={{color:'rgba(255,120,120,0.8)'}}>{errorMsg}</p>
+          {/* ── Right: transcript + text chat ── */}
+          <div className="flex-1 flex flex-col gap-3 min-w-0" style={{maxWidth:320}}>
+            {/* Live transcript */}
+            {transcript && (
+              <div className="px-3 py-2 rounded-xl" style={{background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)',animation:'vcTextIn 0.25s ease both'}}>
+                <p className="text-[9px] tracking-widest uppercase mb-1" style={{color:'rgba(255,255,255,0.2)'}}>LUNAR · LIVE</p>
+                <p className="text-sm font-light leading-relaxed italic" style={{color:'rgba(255,255,255,0.65)'}}>{transcript}</p>
+              </div>
+            )}
+
+            {/* Chat history */}
+            <div ref={chatScrollRef} className="flex flex-col gap-2 overflow-y-auto" style={{maxHeight:260,minHeight:80}}>
+              {textHistory.map((m,i) => (
+                <div key={i} className={m.role === 'user' ? 'text-right' : 'text-left'} style={{animation:'vcTextIn 0.2s ease both'}}>
+                  {m.role === 'lunar'
+                    ? <p className="text-[11px] leading-relaxed italic" style={{color:'rgba(220,180,255,0.8)'}}>{m.text}</p>
+                    : <p className="text-[11px] leading-relaxed" style={{color:'rgba(255,255,255,0.4)'}}>you: {m.text}</p>
+                  }
+                </div>
+              ))}
+              {textLoading && (
+                <div className="flex items-center gap-2">
+                  <Loader2 size={10} className="animate-spin" style={{color:'rgba(200,160,255,0.6)'}} />
+                  <span className="text-[9px] tracking-widest" style={{color:'rgba(200,160,255,0.4)'}}>lunar typing...</span>
+                </div>
+              )}
+            </div>
+
+            {/* Text input — always visible */}
+            <div className="flex items-center gap-2 rounded-xl px-3 py-2"
+              style={{background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.1)'}}>
+              <input
+                ref={inputRef}
+                value={textInput}
+                onChange={e => setTextInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendText()}
+                placeholder="type to LUNAR..."
+                autoFocus
+                className="flex-1 bg-transparent outline-none text-[11px] placeholder:opacity-20"
+                style={{color:'rgba(255,255,255,0.7)',caretColor:'rgba(200,160,255,0.8)'}}
+              />
+              <button onClick={sendText} disabled={!textInput.trim() || textLoading}
+                className="transition-opacity disabled:opacity-20 hover:opacity-80">
+                <Send size={12} style={{color:'rgba(200,160,255,0.7)'}} />
+              </button>
+            </div>
+
+            <p className="text-[7px] tracking-widest uppercase text-center" style={{color:'rgba(255,255,255,0.07)'}}>
+              {micActive ? 'voice + text active' : 'text mode — mic unavailable'}
+            </p>
           </div>
-        )}
-
-        {/* Controls */}
-        <div className="flex items-center gap-5" style={{animation:'vcFade 0.5s 0.22s ease both'}}>
-          {status === 'error' ? (
-            <>
-              <button onClick={handleRetry}
-                className="px-5 py-2.5 rounded-full font-bold text-[11px] tracking-[0.3em] uppercase transition-all active:scale-95 hover:brightness-110"
-                style={{background:'rgba(255,255,255,0.1)',border:'1px solid rgba(255,255,255,0.22)',color:'rgba(255,255,255,0.8)'}}>
-                Retry
-              </button>
-              <button onClick={handleEnd}
-                className="w-14 h-14 rounded-full flex items-center justify-center transition-all active:scale-90 hover:brightness-110"
-                style={{background:'rgba(210,35,35,0.92)',border:'1px solid rgba(255,80,80,0.3)',boxShadow:'0 0 40px rgba(210,35,35,0.3)'}}>
-                <PhoneOff size={20} style={{color:'white'}} />
-              </button>
-            </>
-          ) : (
-            <>
-              <button onClick={() => setMuted(m => !m)}
-                className="w-14 h-14 rounded-full flex items-center justify-center transition-all active:scale-90 relative overflow-hidden"
-                style={{
-                  background: muted?'rgba(255,255,255,0.12)':'rgba(255,255,255,0.06)',
-                  border: muted?'1px solid rgba(255,255,255,0.28)':'1px solid rgba(255,255,255,0.1)',
-                }}>
-                <Mic size={18} style={{color:muted?'rgba(255,255,255,0.35)':'rgba(255,255,255,0.55)'}} />
-                {muted && (
-                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                    <div style={{width:24,height:1.5,background:'rgba(255,255,255,0.5)',transform:'rotate(-45deg)',borderRadius:2}} />
-                  </div>
-                )}
-              </button>
-              <button onClick={handleEnd}
-                className="w-16 h-16 rounded-full flex items-center justify-center transition-all active:scale-90 hover:brightness-110"
-                style={{background:'rgba(210,35,35,0.92)',border:'1px solid rgba(255,80,80,0.3)',boxShadow:'0 0 40px rgba(210,35,35,0.3)'}}>
-                <PhoneOff size={22} style={{color:'white'}} />
-              </button>
-            </>
-          )}
         </div>
-
-        <p className="mt-5 text-[8px] tracking-[0.5em] uppercase" style={{color:'rgba(255,255,255,0.08)'}}>
-          {status === 'error' ? 'CALL FAILED' : muted ? 'MIC MUTED' : 'SPEAK TO LUNAR'}
-        </p>
       </div>
     </>
   )
@@ -829,8 +969,29 @@ export default function LunarAI({ goToTab, isOpen, onClose, onCommand, feetPics 
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
   }, [messages, loading, embeddedVideo, embeddedImage])
 
-  // ── Fetch video via xVideos search → real stream URL (no embed) ─────────────
-  const fetchVideoForChat = useCallback(async (query: string): Promise<{ url: string; title: string } | null> => {
+  // ── Fetch video: PH search → real HLS stream URL ─────────────────────────────
+  const fetchPHVideo = useCallback(async (query: string): Promise<{ url: string; title: string } | null> => {
+    try {
+      // Step 1: search PH for videos
+      const sr = await fetch(`/api/ph-keyword-search?q=${encodeURIComponent(query)}`, { signal: AbortSignal.timeout(20000) })
+      if (sr.ok) {
+        const sd = await sr.json()
+        const results = (sd.videos || sd.results || []) as Array<{ title: string; eid?: string; videoPageUrl?: string; url?: string }>
+        if (results.length > 0) {
+          const pick = results[Math.floor(Math.random() * Math.min(6, results.length))]
+          const vk = pick.eid
+          if (vk) {
+            // Step 2: extract actual HLS stream
+            const ir = await fetch(`/api/ph-stream?viewkey=${encodeURIComponent(vk)}`, { signal: AbortSignal.timeout(22000) })
+            if (ir.ok) {
+              const d = await ir.json()
+              if (d.streamUrl) return { url: d.streamUrl, title: d.title || pick.title }
+            }
+          }
+        }
+      }
+    } catch { /* ignore */ }
+    // Fallback: xVideos
     try {
       const sr = await fetch(`/api/xvsearch?q=${encodeURIComponent(query)}`, { signal: AbortSignal.timeout(14000) })
       if (sr.ok) {
@@ -841,9 +1002,7 @@ export default function LunarAI({ goToTab, isOpen, onClose, onCommand, feetPics 
           const ir = await fetch(`/api/xv-info?url=${encodeURIComponent(pick.videoPageUrl)}`, { signal: AbortSignal.timeout(18000) })
           if (ir.ok) {
             const { streamUrl, title } = await ir.json()
-            if (streamUrl) {
-              return { url: `/api/stream?url=${encodeURIComponent(streamUrl)}`, title: title || pick.title }
-            }
+            if (streamUrl) return { url: streamUrl, title: title || pick.title }
           }
         }
       }

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, forwardRef } from 'react'
 import { Send, Loader2, X, ChevronRight, Play, Eye, Image, User, Zap, Search } from 'lucide-react'
 import Hls from 'hls.js'
 
@@ -112,46 +112,105 @@ interface PHVideo { title: string; url: string; eid?: string; default_thumb?: st
 interface XVVideo { id: string; title: string; thumbnail: string; videoPageUrl: string }
 interface CanvasImage { url: string; label: string }
 
-// ─── PornHub video fetcher with fallback ──────────────────────────────────────
-async function fetchPHVideo(query: string): Promise<{ embedUrl: string; title: string } | null> {
+// ─── PornHub: search → pick best result → extract HLS stream URL ─────────────
+async function fetchPHVideo(query: string): Promise<{ streamUrl: string; title: string } | null> {
   const extractViewkey = (url: string) => {
-    const m = url.match(/viewkey=([a-z0-9]+)/i) || url.match(/\/embed\/([a-z0-9]+)/i) || url.match(/ph([a-f0-9]+)/i)
+    const m = url.match(/viewkey=([a-z0-9]+)/i) || url.match(/\/embed\/([a-z0-9]+)/i)
     return m?.[1] || null
   }
 
-  // Try 1: PH keyword scraper (scrapes actual PH search page)
+  let vk: string | null = null
+  let title = query
+
+  // Step 1: search for videos using the scraper
   try {
-    const r1 = await fetch(`/api/ph-keyword-search?q=${encodeURIComponent(query)}`, { signal: AbortSignal.timeout(15000) })
-    if (r1.ok) {
-      const d1 = await r1.json()
-      const vids = (d1.videos || d1.results || []) as Array<{ title: string; url?: string; viewkey?: string; videoPageUrl?: string; vkey?: string; eid?: string; id?: string }>
+    const r = await fetch(`/api/ph-keyword-search?q=${encodeURIComponent(query)}`, { signal: AbortSignal.timeout(20000) })
+    if (r.ok) {
+      const d = await r.json()
+      const vids = (d.videos || d.results || []) as Array<{ title: string; url?: string; videoPageUrl?: string; eid?: string }>
       if (vids.length > 0) {
-        const pick = vids[Math.floor(Math.random() * Math.min(8, vids.length))]
-        // ph-keyword-search uses `eid` as the viewkey
-        const vk = pick.eid || pick.viewkey || pick.vkey || extractViewkey(pick.videoPageUrl || pick.url || '')
-        if (vk) return { embedUrl: `https://www.pornhub.com/embed/${vk}`, title: pick.title }
+        const pick = vids[Math.floor(Math.random() * Math.min(6, vids.length))]
+        vk = pick.eid || extractViewkey(pick.videoPageUrl || pick.url || '')
+        title = pick.title || query
       }
     }
   } catch { /* fall through */ }
 
-  // Try 2: PH webmaster API
+  if (!vk) return null
+
+  // Step 2: extract actual HLS stream URL from the video page
   try {
-    const r2 = await fetch(`/api/pornhub/search?q=${encodeURIComponent(query)}`, { signal: AbortSignal.timeout(12000) })
+    const r2 = await fetch(`/api/ph-stream?viewkey=${encodeURIComponent(vk)}`, { signal: AbortSignal.timeout(25000) })
     if (r2.ok) {
       const d2 = await r2.json()
-      const vids = (d2.videos || []) as Array<{ title: string; url: string; embed_url?: string }>
-      if (vids.length > 0) {
-        const pick = vids[Math.floor(Math.random() * Math.min(5, vids.length))]
-        const embedUrl = pick.embed_url || (() => {
-          const vk = extractViewkey(pick.url)
-          return vk ? `https://www.pornhub.com/embed/${vk}` : null
-        })()
-        if (embedUrl) return { embedUrl, title: pick.title }
-      }
+      if (d2.streamUrl) return { streamUrl: d2.streamUrl, title: d2.title || title }
     }
   } catch { /* fall through */ }
 
   return null
+}
+
+// ─── Resolve xVideos stream URL from page URL ─────────────────────────────────
+async function fetchXVStream(videoPageUrl: string): Promise<{ streamUrl: string } | null> {
+  try {
+    const r = await fetch(`/api/xv-info?url=${encodeURIComponent(videoPageUrl)}`, { signal: AbortSignal.timeout(20000) })
+    if (r.ok) {
+      const d = await r.json()
+      if (d.streamUrl) return { streamUrl: d.streamUrl }
+    }
+  } catch { /* fall through */ }
+  return null
+}
+
+// ─── HLS-capable video player ─────────────────────────────────────────────────
+function HlsVideoPlayer({ url, title }: { url: string; title: string }) {
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const hlsRef = useRef<Hls | null>(null)
+  const [error, setError] = useState(false)
+
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video || !url) return
+    setError(false)
+
+    const isM3u8 = url.includes('.m3u8') || url.includes('/stream')
+    if (isM3u8) {
+      if (Hls.isSupported()) {
+        const hls = new Hls({ maxBufferLength: 30, enableWorker: false })
+        hlsRef.current = hls
+        hls.loadSource(url)
+        hls.attachMedia(video)
+        hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(() => {}) })
+        hls.on(Hls.Events.ERROR, (_ev, data) => { if (data.fatal) setError(true) })
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = url
+        video.play().catch(() => {})
+      } else {
+        setError(true)
+      }
+    } else {
+      video.src = url
+      video.play().catch(() => {})
+    }
+
+    return () => { hlsRef.current?.destroy(); hlsRef.current = null }
+  }, [url])
+
+  if (error) return (
+    <div className="w-full h-full flex flex-col items-center justify-center gap-2"
+      style={{ background: 'rgba(0,0,0,0.8)' }}>
+      <span style={{ color: 'rgba(168,85,247,0.5)', fontSize: 24 }}>⚠</span>
+      <p className="text-[8px] tracking-widest uppercase text-center px-3" style={{ color: 'rgba(255,255,255,0.3)' }}>
+        Stream unavailable.<br />Try another query.
+      </p>
+    </div>
+  )
+
+  return (
+    <video ref={videoRef} className="w-full h-full object-contain" controls autoPlay playsInline
+      style={{ background: '#000' }}
+      title={title} />
+  )
 }
 
 // ─── Analysis trigger detection ───────────────────────────────────────────────
@@ -161,27 +220,22 @@ function isAnalysisRequest(text: string): boolean {
   return ANALYSIS_TRIGGERS.some(kw => t.includes(kw))
 }
 
-// ─── Branch video player — grows from LUNAR avatar with SVG line animation ────
+// ─── Branch video player — grows from LUNAR avatar with animated SVG line ────
 function BranchVideoPlayer({ embed, onClose }: { embed: { url: string; title: string }; onClose: () => void }) {
-  const [phase, setPhase] = useState<'line' | 'box'>('line')
-  const [paused, setPaused] = useState(false)
-  const iframeRef = useRef<HTMLIFrameElement>(null)
+  const [phase, setPhase] = useState<0 | 1 | 2 | 3>(0)
 
   useEffect(() => {
-    const t = setTimeout(() => setPhase('box'), 650)
-    return () => clearTimeout(t)
+    const t1 = setTimeout(() => setPhase(1), 60)   // line starts drawing
+    const t2 = setTimeout(() => setPhase(2), 500)  // nodes pop
+    const t3 = setTimeout(() => setPhase(3), 700)  // box appears
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3) }
   }, [])
 
-  // LUNAR remote control — pause / resume via postMessage
+  // LUNAR remote control
+  const videoRef = useRef<HTMLVideoElement>(null)
   useEffect(() => {
-    const onPause = () => {
-      setPaused(true)
-      iframeRef.current?.contentWindow?.postMessage('{"event":"pause"}', '*')
-    }
-    const onResume = () => {
-      setPaused(false)
-      iframeRef.current?.contentWindow?.postMessage('{"event":"play"}', '*')
-    }
+    const onPause = () => { videoRef.current?.pause() }
+    const onResume = () => { videoRef.current?.play().catch(() => {}) }
     window.addEventListener('lunar:mf-pause', onPause)
     window.addEventListener('lunar:mf-resume', onResume)
     return () => {
@@ -192,51 +246,54 @@ function BranchVideoPlayer({ embed, onClose }: { embed: { url: string; title: st
 
   return (
     <>
-      {/* SVG branch line growing from avatar center (50%,50%) to top-right box */}
+      {/* SVG branch — 3-segment zig-zag from avatar to box corner */}
       <svg className="absolute inset-0 w-full h-full pointer-events-none" style={{ zIndex: 12, overflow: 'visible' }}>
         <defs>
-          <filter id="mf-glow">
-            <feGaussianBlur stdDeviation="3" result="blur" />
-            <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
-          </filter>
+          <filter id="mf-glow"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+          <filter id="mf-glow2"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
         </defs>
-        {/* Main branch line */}
-        <line x1="50%" y1="50%" x2="76%" y2="20%"
-          stroke="rgba(168,85,247,0.7)" strokeWidth="1.5" strokeDasharray="2000"
-          strokeDashoffset={phase === 'line' ? 2000 : 0}
+        {/* Glow halo behind main line */}
+        <polyline points="50%,50% 62%,34% 71%,22% 79%,12%"
+          fill="none" stroke="rgba(168,85,247,0.15)" strokeWidth="6"
+          strokeLinejoin="round" strokeLinecap="round"
+          style={{ strokeDasharray: 900, strokeDashoffset: phase >= 1 ? 0 : 900, transition: 'stroke-dashoffset 0.55s cubic-bezier(0.4,0,0.2,1)' }} />
+        {/* Main line */}
+        <polyline points="50%,50% 62%,34% 71%,22% 79%,12%"
+          fill="none" stroke="rgba(168,85,247,0.75)" strokeWidth="1.5"
+          strokeLinejoin="round" strokeLinecap="round"
           filter="url(#mf-glow)"
-          style={{ transition: 'stroke-dashoffset 0.65s cubic-bezier(0.4,0,0.2,1)' }} />
-        {/* Secondary thinner line */}
-        <line x1="50%" y1="50%" x2="76%" y2="20%"
-          stroke="rgba(168,85,247,0.2)" strokeWidth="4" strokeDasharray="2000"
-          strokeDashoffset={phase === 'line' ? 2000 : 0}
-          style={{ transition: 'stroke-dashoffset 0.65s cubic-bezier(0.4,0,0.2,1)' }} />
-        {/* Midpoint nodes */}
-        {[['57%','38%'], ['65%','29%']].map(([cx, cy], i) => (
-          <circle key={i} cx={cx} cy={cy} r="2.5" fill="rgba(168,85,247,0.8)"
-            filter="url(#mf-glow)"
-            style={{ opacity: phase === 'box' ? 1 : 0, transition: `opacity 0.25s ${0.15 + i * 0.1}s ease` }} />
+          style={{ strokeDasharray: 900, strokeDashoffset: phase >= 1 ? 0 : 900, transition: 'stroke-dashoffset 0.55s cubic-bezier(0.4,0,0.2,1)' }} />
+        {/* Junction nodes */}
+        {([['62%','34%',2.5,0.08], ['71%','22%',3,0.16]] as [string,string,number,number][]).map(([cx,cy,r,delay],i) => (
+          <g key={i}>
+            <circle cx={cx} cy={cy} r={r+4} fill="rgba(168,85,247,0.12)" filter="url(#mf-glow2)"
+              style={{ opacity: phase >= 2 ? 1 : 0, transition: `opacity 0.2s ${delay}s ease` }} />
+            <circle cx={cx} cy={cy} r={r} fill="rgba(168,85,247,0.9)" filter="url(#mf-glow)"
+              style={{ opacity: phase >= 2 ? 1 : 0, transition: `opacity 0.2s ${delay}s ease` }} />
+          </g>
         ))}
-        {/* Terminal node */}
-        <circle cx="76%" cy="20%" r="5" fill="rgba(168,85,247,0.95)"
-          filter="url(#mf-glow)"
-          style={{ opacity: phase === 'box' ? 1 : 0, transition: 'opacity 0.25s 0.4s ease' }} />
+        {/* Terminal node — pulsing ring */}
+        <circle cx="79%" cy="12%" r="9" fill="rgba(168,85,247,0.08)" filter="url(#mf-glow2)"
+          style={{ opacity: phase >= 2 ? 1 : 0, transition: 'opacity 0.2s 0.28s ease',
+            animation: phase >= 2 ? 'mfRing 1.8s 0.3s ease-out infinite' : 'none' }} />
+        <circle cx="79%" cy="12%" r="5" fill="rgba(168,85,247,0.95)" filter="url(#mf-glow)"
+          style={{ opacity: phase >= 2 ? 1 : 0, transition: 'opacity 0.2s 0.28s ease' }} />
       </svg>
 
-      {/* Video box — positioned top-right */}
-      {phase === 'box' && (
+      {/* Video box — top-right */}
+      {phase >= 3 && (
         <div className="absolute z-20 flex flex-col rounded-2xl overflow-hidden"
           style={{
-            right: '2%', top: '3%',
-            width: 'clamp(260px, 40%, 360px)',
+            right: '2%', top: '2%',
+            width: 'clamp(240px, 38%, 340px)',
             border: '1px solid rgba(168,85,247,0.5)',
-            background: 'rgba(2,2,6,0.98)',
-            boxShadow: '0 0 60px rgba(168,85,247,0.3), 0 24px 80px rgba(0,0,0,0.9)',
-            animation: 'mfNodeIn 0.45s cubic-bezier(0.34,1.4,0.64,1) both',
+            background: '#020206',
+            boxShadow: '0 0 80px rgba(168,85,247,0.25), 0 0 30px rgba(168,85,247,0.12), 0 28px 80px rgba(0,0,0,0.95)',
+            animation: 'mfBoxIn 0.4s cubic-bezier(0.34,1.4,0.64,1) both',
           }}>
           {/* Header */}
           <div className="flex items-center gap-2 px-3 py-2 shrink-0"
-            style={{ background: 'rgba(168,85,247,0.12)', borderBottom: '1px solid rgba(168,85,247,0.2)' }}>
+            style={{ background: 'rgba(168,85,247,0.1)', borderBottom: '1px solid rgba(168,85,247,0.18)' }}>
             <div className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: '#a855f7', boxShadow: '0 0 6px #a855f7' }} />
             <span className="flex-1 text-[9px] font-bold tracking-wider uppercase truncate" style={{ color: 'rgba(168,85,247,0.9)' }}>
               ▶ {embed.title}
@@ -245,34 +302,23 @@ function BranchVideoPlayer({ embed, onClose }: { embed: { url: string; title: st
               <X size={10} style={{ color: 'white' }} />
             </button>
           </div>
-          {/* Player */}
-          <div className="relative" style={{ aspectRatio: '16/9' }}>
-            <iframe ref={iframeRef} src={embed.url} className="w-full h-full border-0"
-              allowFullScreen allow="autoplay; fullscreen" title={embed.title} />
-            {/* Paused overlay */}
-            {paused && (
-              <div className="absolute inset-0 flex items-center justify-center"
-                style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(6px)', animation: 'mfNodeIn 0.2s ease both' }}>
-                <div className="text-center">
-                  <div className="text-3xl mb-2 opacity-60">⏸</div>
-                  <p className="text-[8px] tracking-widest uppercase" style={{ color: 'rgba(168,85,247,0.7)' }}>LUNAR paused</p>
-                </div>
-              </div>
-            )}
+          {/* HLS video player */}
+          <div className="relative bg-black" style={{ aspectRatio: '16/9' }}>
+            <HlsVideoPlayer url={embed.url} title={embed.title} />
             {/* Corner accents */}
             {[
-              { top: 6, left: 6, borderTop: '1px solid rgba(168,85,247,0.5)', borderLeft: '1px solid rgba(168,85,247,0.5)' },
-              { top: 6, right: 6, borderTop: '1px solid rgba(168,85,247,0.5)', borderRight: '1px solid rgba(168,85,247,0.5)' },
-              { bottom: 6, left: 6, borderBottom: '1px solid rgba(168,85,247,0.5)', borderLeft: '1px solid rgba(168,85,247,0.5)' },
-              { bottom: 6, right: 6, borderBottom: '1px solid rgba(168,85,247,0.5)', borderRight: '1px solid rgba(168,85,247,0.5)' },
-            ].map((s, i) => <div key={i} className="absolute pointer-events-none" style={{ ...s, width: 12, height: 12 }} />)}
+              { top: 4, left: 4, borderTop: '1px solid rgba(168,85,247,0.4)', borderLeft: '1px solid rgba(168,85,247,0.4)' },
+              { top: 4, right: 4, borderTop: '1px solid rgba(168,85,247,0.4)', borderRight: '1px solid rgba(168,85,247,0.4)' },
+              { bottom: 4, left: 4, borderBottom: '1px solid rgba(168,85,247,0.4)', borderLeft: '1px solid rgba(168,85,247,0.4)' },
+              { bottom: 4, right: 4, borderBottom: '1px solid rgba(168,85,247,0.4)', borderRight: '1px solid rgba(168,85,247,0.4)' },
+            ].map((s, i) => <div key={i} className="absolute pointer-events-none" style={{ ...s, width: 10, height: 10 }} />)}
           </div>
           {/* Footer */}
           <div className="px-3 py-1.5 flex items-center gap-2"
-            style={{ background: 'rgba(168,85,247,0.06)', borderTop: '1px solid rgba(168,85,247,0.12)' }}>
-            <div className="w-1 h-1 rounded-full animate-pulse" style={{ background: 'rgba(168,85,247,0.6)' }} />
-            <span className="text-[7px] tracking-widest uppercase font-bold" style={{ color: 'rgba(168,85,247,0.35)' }}>
-              ask LUNAR to pause · resume · download
+            style={{ background: 'rgba(168,85,247,0.05)', borderTop: '1px solid rgba(168,85,247,0.1)' }}>
+            <div className="w-1 h-1 rounded-full animate-pulse" style={{ background: 'rgba(168,85,247,0.5)' }} />
+            <span className="text-[7px] tracking-widest uppercase font-bold" style={{ color: 'rgba(168,85,247,0.3)' }}>
+              NEURAL FEED ACTIVE · LUNAR STREAM
             </span>
           </div>
         </div>
@@ -461,7 +507,7 @@ function Console({
         return
       }
 
-      // ── PLAY_VIDEO (preferred — auto-plays best result) ────────────────────
+      // ── PLAY_VIDEO (preferred — search + real HLS stream) ──────────────────
       const playVidMatch = reply.match(/\[PLAY_VIDEO:([^\]]+)\]/i)
       if (playVidMatch) {
         const query = playVidMatch[1].trim()
@@ -470,12 +516,12 @@ function Console({
         try {
           const vid = await fetchPHVideo(query)
           if (vid) {
-            onVideoPlay?.(vid.embedUrl, vid.title)
+            onVideoPlay?.(vid.streamUrl, vid.title)
           } else {
             setMsgs(prev => [...prev, { role: 'lunar', content: '> Signal weak — no feed for that query, daddy. Try something else.' }])
           }
         } catch {
-          setMsgs(prev => [...prev, { role: 'lunar', content: '> PH stream offline. Neural link disrupted.' }])
+          setMsgs(prev => [...prev, { role: 'lunar', content: '> Stream offline. Neural link disrupted.' }])
         }
         return
       }
@@ -496,7 +542,7 @@ function Console({
         return
       }
 
-      // ── PORNHUB_SEARCH (grid + auto-play) ──────────────────────────────────
+      // ── PORNHUB_SEARCH (grid + auto-play best result via real stream) ────────
       const phMatch = reply.match(/\[PORNHUB_SEARCH:([^\]]+)\]/i)
       if (phMatch) {
         const query = phMatch[1].trim()
@@ -505,39 +551,36 @@ function Console({
         const displayReply = reply.replace(/\[PORNHUB_SEARCH:[^\]]+\]/i, '').trim()
         setMsgs(prev => [...prev, { role: 'lunar', content: displayReply || `Scanning PornHub neural feed for "${query}"...` }])
         try {
-          // Try ph-keyword-search first (scraper), fallback to webmaster API
           let vids: PHVideo[] = []
-          try {
-            const sr1 = await fetch(`/api/ph-keyword-search?q=${encodeURIComponent(query)}`, { signal: AbortSignal.timeout(12000) })
-            if (sr1.ok) {
-              const sd1 = await sr1.json()
-              const raw = (sd1.videos || sd1.results || []) as Array<{ title: string; url?: string; videoPageUrl?: string; viewkey?: string; vkey?: string; eid?: string; default_thumb?: string; thumbnail?: string; duration?: string }>
-              vids = raw.map(v => ({
-                title: v.title,
-                // eid = vkey from scraper (data-video-vkey), used to build embed URL
-                eid: v.eid || v.viewkey || v.vkey || undefined,
-                url: v.url || v.videoPageUrl || '',
-                default_thumb: v.default_thumb || v.thumbnail,
-                duration: v.duration,
-              })).filter(v => v.url).slice(0, 8)
-            }
-          } catch { /* ignore */ }
-          if (vids.length === 0) {
-            const sr2 = await fetch(`/api/pornhub/search?q=${encodeURIComponent(query)}`, { signal: AbortSignal.timeout(12000) })
-            if (sr2.ok) {
-              const sd2 = await sr2.json()
-              vids = (sd2.videos || []).slice(0, 8) as PHVideo[]
-            }
+          const sr1 = await fetch(`/api/ph-keyword-search?q=${encodeURIComponent(query)}`, { signal: AbortSignal.timeout(20000) })
+          if (sr1.ok) {
+            const sd1 = await sr1.json()
+            const raw = (sd1.videos || sd1.results || []) as Array<{ title: string; url?: string; videoPageUrl?: string; eid?: string; thumbnail?: string; duration?: string }>
+            vids = raw.map(v => ({
+              title: v.title,
+              eid: v.eid || undefined,
+              url: v.videoPageUrl || v.url || '',
+              default_thumb: v.thumbnail,
+              duration: v.duration,
+            })).filter(v => v.url).slice(0, 8)
           }
-          // Auto-play best result — prefer eid (viewkey from scraper), fall back to URL extraction
+          setPhResults(vids)
+          // Auto-play best result via real HLS stream
           if (vids.length > 0) {
             const pick = vids[Math.floor(Math.random() * Math.min(4, vids.length))]
-            const vk = pick.eid || (pick.url ? (pick.url.match(/viewkey=([a-z0-9]+)/i)?.[1] || pick.url.match(/\/embed\/([a-z0-9]+)/i)?.[1]) : null)
-            if (vk) onVideoPlay?.(`https://www.pornhub.com/embed/${vk}`, pick.title)
+            const vk = pick.eid
+            if (vk) {
+              setMsgs(prev => [...prev, { role: 'lunar', content: `> Extracting neural stream for: ${pick.title}` }])
+              const sr2 = await fetch(`/api/ph-stream?viewkey=${encodeURIComponent(vk)}`, { signal: AbortSignal.timeout(25000) })
+              if (sr2.ok) {
+                const sd2 = await sr2.json()
+                if (sd2.streamUrl) onVideoPlay?.(sd2.streamUrl, sd2.title || pick.title)
+                else setMsgs(prev => [...prev, { role: 'lunar', content: '> Select a video from the grid below, daddy.' }])
+              }
+            }
           } else {
             setMsgs(prev => [...prev, { role: 'lunar', content: '> Neural feed returned no signal. Try another query, daddy.' }])
           }
-          setPhResults(vids)
         } catch {
           setMsgs(prev => [...prev, { role: 'lunar', content: '> PH stream error. Reconnecting...' }])
         }
@@ -552,9 +595,25 @@ function Console({
         setPhResults([])
         const displayReply = reply.replace(/\[XVIDEO_SEARCH:[^\]]+\]/i, '').trim()
         setMsgs(prev => [...prev, { role: 'lunar', content: displayReply || `Scanning xVideos for "${query}"...` }])
-        const sr = await fetch(`/api/xvsearch?q=${encodeURIComponent(query)}`)
-        const sd = await sr.json()
-        setXvResults((sd.results || []).slice(0, 8))
+        try {
+          const sr = await fetch(`/api/xvsearch?q=${encodeURIComponent(query)}`, { signal: AbortSignal.timeout(20000) })
+          const sd = await sr.json()
+          const vids: XVVideo[] = (sd.results || []).slice(0, 8)
+          setXvResults(vids)
+          // Auto-play best result
+          if (vids.length > 0) {
+            const pick = vids[Math.floor(Math.random() * Math.min(3, vids.length))]
+            setMsgs(prev => [...prev, { role: 'lunar', content: `> Extracting stream: ${pick.title}` }])
+            const ir = await fetch(`/api/xv-info?url=${encodeURIComponent(pick.videoPageUrl)}`, { signal: AbortSignal.timeout(20000) })
+            if (ir.ok) {
+              const id = await ir.json()
+              if (id.streamUrl) onVideoPlay?.(id.streamUrl, pick.title)
+              else setMsgs(prev => [...prev, { role: 'lunar', content: '> Select a video from the grid below, daddy.' }])
+            }
+          }
+        } catch {
+          setMsgs(prev => [...prev, { role: 'lunar', content: '> xVideos stream error. Try another query.' }])
+        }
         return
       }
 
@@ -617,16 +676,44 @@ function Console({
     return m?.[1] || null
   }
 
-  const playPH = (v: PHVideo) => {
-    const vk = extractViewkey(v.url)
-    const embedUrl = vk ? `https://www.pornhub.com/embed/${vk}` : v.url
-    onVideoPlay?.(embedUrl, v.title)
+  const playPH = async (v: PHVideo) => {
     setPhResults([])
+    setLoading(true)
+    try {
+      // Try to get actual HLS stream URL from the video page
+      const vk = v.eid || extractViewkey(v.url)
+      if (vk) {
+        const r = await fetch(`/api/ph-stream?viewkey=${encodeURIComponent(vk)}`, { signal: AbortSignal.timeout(20000) })
+        if (r.ok) {
+          const d = await r.json()
+          if (d.streamUrl) { onVideoPlay?.(d.streamUrl, d.title || v.title); return }
+        }
+      }
+      setMsgs(prev => [...prev, { role: 'lunar', content: '> Stream extraction failed for that video. Try another.' }])
+    } catch {
+      setMsgs(prev => [...prev, { role: 'lunar', content: '> PH stream unavailable. Try another.' }])
+    } finally {
+      setLoading(false)
+      setTimeout(() => inputRef.current?.focus(), 100)
+    }
   }
 
-  const playXV = (v: XVVideo) => {
-    onVideoPlay?.(`https://www.xvideos.com/embedframe/${v.id}`, v.title)
+  const playXV = async (v: XVVideo) => {
     setXvResults([])
+    setLoading(true)
+    try {
+      const r = await fetch(`/api/xv-info?url=${encodeURIComponent(v.videoPageUrl)}`, { signal: AbortSignal.timeout(20000) })
+      if (r.ok) {
+        const d = await r.json()
+        if (d.streamUrl) { onVideoPlay?.(d.streamUrl, v.title); return }
+      }
+      setMsgs(prev => [...prev, { role: 'lunar', content: '> xVideos stream extraction failed. Try another.' }])
+    } catch {
+      setMsgs(prev => [...prev, { role: 'lunar', content: '> xVideos stream unavailable. Try another.' }])
+    } finally {
+      setLoading(false)
+      setTimeout(() => inputRef.current?.focus(), 100)
+    }
   }
 
   const analyseSelected = () => {
@@ -819,35 +906,32 @@ function ConnectionCanvas({ containerRef, nodeRefs, selectedIdx }: {
   return <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none" style={{ zIndex: 1 }} />
 }
 
-// ─── Full-area video overlay ──────────────────────────────────────────────────
+// ─── Full-canvas video overlay ────────────────────────────────────────────────
 function CanvasVideoPlayer({ embed, onClose }: { embed: { url: string; title: string }; onClose: () => void }) {
   return (
-    <div className="absolute inset-0 z-20 flex flex-col" style={{ background: 'rgba(0,0,0,0.97)', animation: 'mfNodeIn 0.25s ease both' }}>
+    <div className="absolute inset-0 z-20 flex flex-col" style={{ background: '#000', animation: 'mfNodeIn 0.3s ease both' }}>
       {/* Header */}
-      <div className="shrink-0 flex items-center gap-3 px-4 py-3 border-b" style={{ borderColor: 'rgba(168,85,247,0.2)', background: 'rgba(2,2,4,0.95)' }}>
-        <div className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: '#a855f7' }} />
+      <div className="shrink-0 flex items-center gap-3 px-4 py-2.5 border-b"
+        style={{ borderColor: 'rgba(168,85,247,0.18)', background: 'rgba(2,2,6,0.98)', backdropFilter: 'blur(10px)' }}>
+        <div className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: '#a855f7', boxShadow: '0 0 6px #a855f7' }} />
         <span className="flex-1 text-[10px] font-bold tracking-wider truncate" style={{ color: 'rgba(168,85,247,0.9)' }}>
           ▶ {embed.title}
         </span>
-        <button onClick={onClose} className="opacity-40 hover:opacity-80 transition-opacity w-7 h-7 rounded-lg flex items-center justify-center" style={{ border: '1px solid rgba(255,255,255,0.08)' }}>
+        <button onClick={onClose}
+          className="opacity-40 hover:opacity-80 transition-opacity w-7 h-7 rounded-lg flex items-center justify-center"
+          style={{ border: '1px solid rgba(255,255,255,0.08)' }}>
           <X size={12} style={{ color: 'white' }} />
         </button>
       </div>
-      {/* Player */}
-      <div className="flex-1 relative">
-        <iframe
-          src={embed.url}
-          className="w-full h-full border-0"
-          allowFullScreen
-          allow="autoplay; fullscreen"
-          title={embed.title}
-        />
+      {/* HLS player */}
+      <div className="flex-1 relative bg-black">
+        <HlsVideoPlayer url={embed.url} title={embed.title} />
         {/* Corner accents */}
         {[
-          { top: 8, left: 8, borderTop: '1px solid rgba(168,85,247,0.4)', borderLeft: '1px solid rgba(168,85,247,0.4)' },
-          { top: 8, right: 8, borderTop: '1px solid rgba(168,85,247,0.4)', borderRight: '1px solid rgba(168,85,247,0.4)' },
-          { bottom: 8, left: 8, borderBottom: '1px solid rgba(168,85,247,0.4)', borderLeft: '1px solid rgba(168,85,247,0.4)' },
-          { bottom: 8, right: 8, borderBottom: '1px solid rgba(168,85,247,0.4)', borderRight: '1px solid rgba(168,85,247,0.4)' },
+          { top: 10, left: 10, borderTop: '1px solid rgba(168,85,247,0.35)', borderLeft: '1px solid rgba(168,85,247,0.35)' },
+          { top: 10, right: 10, borderTop: '1px solid rgba(168,85,247,0.35)', borderRight: '1px solid rgba(168,85,247,0.35)' },
+          { bottom: 10, left: 10, borderBottom: '1px solid rgba(168,85,247,0.35)', borderLeft: '1px solid rgba(168,85,247,0.35)' },
+          { bottom: 10, right: 10, borderBottom: '1px solid rgba(168,85,247,0.35)', borderRight: '1px solid rgba(168,85,247,0.35)' },
         ].map((s, i) => <div key={i} className="absolute pointer-events-none" style={{ ...s, width: 16, height: 16 }} />)}
       </div>
     </div>
@@ -1040,8 +1124,9 @@ export default function LunarMainframe({ onNavigate, activeTab }: { onNavigate?:
         @keyframes mfScanH { 0%{left:-30%} 100%{left:110%} }
         @keyframes mfBlink { 0%,100%{opacity:1} 50%{opacity:0} }
         @keyframes mfPulse { 0%,100%{opacity:0.7;transform:scale(1)} 50%{opacity:1;transform:scale(1.03)} }
-        @keyframes mfRing { 0%{transform:scale(1);opacity:0.25} 100%{transform:scale(2);opacity:0} }
+        @keyframes mfRing { 0%{transform:scale(1);opacity:0.4} 100%{transform:scale(2.4);opacity:0} }
         @keyframes mfNodeIn { from{opacity:0;transform:scale(0.8)} to{opacity:1;transform:scale(1)} }
+        @keyframes mfBoxIn { 0%{opacity:0;transform:scale(0.72) translateY(-12px);filter:blur(8px)} 60%{filter:blur(0)} 100%{opacity:1;transform:scale(1) translateY(0)} }
         @keyframes mfScanV { 0%{top:-4%} 100%{top:104%} }
         @keyframes mfLogScroll { 0%{opacity:0;transform:translateX(-8px)} 10%{opacity:1;transform:translateX(0)} 85%{opacity:1} 100%{opacity:0} }
         @keyframes mfHover { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-4px)} }
