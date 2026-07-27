@@ -695,16 +695,38 @@ function VoiceCallOverlay({ onEnd }: { onEnd: () => void }) {
       const d = await r.json()
       const reply = d.reply || "..."
       setTextHistory(prev => [...prev, { role: 'lunar', text: reply }])
-      // Speak the reply
-      if ('speechSynthesis' in window) {
-        window.speechSynthesis.cancel()
-        const utt = new SpeechSynthesisUtterance(reply)
-        utt.pitch = 1.05; utt.rate = 0.92; utt.volume = 0.95
-        const voices = window.speechSynthesis.getVoices()
-        const femVoice = voices.find(v => v.name.toLowerCase().includes('female') || v.name.includes('Samantha') || v.name.includes('Karen') || v.name.includes('Moira') || v.name.includes('Victoria'))
-        if (femVoice) utt.voice = femVoice
-        window.speechSynthesis.speak(utt)
-      }
+      // Speak reply — try xAI TTS (Carina), fall back to browser speechSynthesis
+      ;(async () => {
+        try {
+          const tr = await fetch('/api/tts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: reply }),
+            signal: AbortSignal.timeout(20000),
+          })
+          if (tr.ok) {
+            const blob = await tr.blob()
+            const url = URL.createObjectURL(blob)
+            const audio = new Audio(url)
+            audio.onended = () => URL.revokeObjectURL(url)
+            await audio.play()
+            return
+          }
+        } catch { /* fall through */ }
+        // Browser speechSynthesis fallback
+        if ('speechSynthesis' in window) {
+          window.speechSynthesis.cancel()
+          const utt = new SpeechSynthesisUtterance(reply)
+          utt.pitch = 1.05; utt.rate = 0.92; utt.volume = 0.95
+          const voices = window.speechSynthesis.getVoices()
+          const femVoice = voices.find(v =>
+            v.name.toLowerCase().includes('female') ||
+            ['Samantha','Karen','Moira','Victoria'].some(n => v.name.includes(n))
+          )
+          if (femVoice) utt.voice = femVoice
+          window.speechSynthesis.speak(utt)
+        }
+      })()
     } catch {
       setTextHistory(prev => [...prev, { role: 'lunar', text: "Signal lost momentarily, daddy. Try again." }])
     } finally {

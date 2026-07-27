@@ -53,6 +53,7 @@ import Hls from "hls.js";
 import type { ProfileItem, XvResult, ProfileUser, XAuthStatus } from "./api";
 import AgeGate from "./components/AgeGate";
 import PasswordGate from "./components/PasswordGate";
+import OnboardingFlow, { ONBOARDING_KEY } from "./components/OnboardingFlow";
 import CreamyShufflePopup from "./components/CreamyShufflePopup";
 import SpicyGame from "./components/SpicyGame";
 import AdultGames from "./components/AdultGames";
@@ -602,6 +603,9 @@ function App() {
   const [ageVerified, setAgeVerified] = useState(false);
   const [ageRevealDone, setAgeRevealDone] = useState(false);
   const [passwordVerified, setPasswordVerified] = useState(false);
+  const [onboardingDone, setOnboardingDone] = useState(() => {
+    try { return localStorage.getItem(ONBOARDING_KEY) === '1' } catch { return false }
+  });
   const [splashDone, setSplashDone] = useState(() => {
     try { return sessionStorage.getItem('cng-splash-v1') === '1' } catch { return false }
   });
@@ -1923,6 +1927,19 @@ function App() {
         {/* ── Post-auth intro — cinematic welcome, shown once per session ── */}
         {ageVerified && !ageRevealDone && (
           <PostAuthIntro onDone={() => setAgeRevealDone(true)} />
+        )}
+        {/* ── Onboarding flow — get started wizard, shown once ever ── */}
+        {ageRevealDone && !onboardingDone && (
+          <OnboardingFlow
+            authUsername={authUsername}
+            boyName={boyName}
+            onSignIn={() => setLoginOpen(true)}
+            onSetBoyName={(name) => {
+              setBoyName(name);
+              try { localStorage.setItem('goon-boy-name', name) } catch {}
+            }}
+            onDone={() => setOnboardingDone(true)}
+          />
         )}
 
         {/* ── LUNAR AI — global floating button + overlay ── */}

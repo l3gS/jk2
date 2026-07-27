@@ -4630,6 +4630,39 @@ app.post('/api/grok-voice', async (req, res) => {
   }
 });
 
+// ── xAI TTS — proxy to https://api.x.ai/v1/tts, voice: Carina ───────────────
+app.post('/api/tts', async (req, res) => {
+  if (!XAI_KEY) return res.status(503).json({ error: 'XAI_API_KEY not configured' });
+  const { text } = req.body;
+  if (!text || typeof text !== 'string') return res.status(400).json({ error: 'text required' });
+  try {
+    const r = await fetch('https://api.x.ai/v1/tts', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${XAI_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: text.slice(0, 4096),
+        voice_id: 'Carina',
+        output_format: { codec: 'mp3', sample_rate: 44100, bit_rate: 128000 },
+        language: 'en',
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+    if (!r.ok) {
+      const body = await r.text();
+      console.warn('tts error:', r.status, body.slice(0, 160));
+      return res.status(r.status).json({ error: 'TTS upstream error' });
+    }
+    const buf = Buffer.from(await r.arrayBuffer());
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Content-Length', buf.length);
+    res.setHeader('Cache-Control', 'no-cache');
+    res.send(buf);
+  } catch (err) {
+    console.error('tts error:', err.message);
+    res.status(500).json({ error: 'TTS failed' });
+  }
+});
+
 // ── Grok 4 chat proxy (LUNAR secretary + mainframe console) ──────────────
 app.post('/api/grok', async (req, res) => {
   if (!XAI_KEY) return res.status(503).json({ error: 'XAI_API_KEY not configured' });
@@ -4807,7 +4840,7 @@ lunaVoiceWss.on('connection', (browserWs, req) => {
     browserWs.close(1008, 'origin not allowed');
     return;
   }
-  const xaiUrl = `wss://api.x.ai/v1/realtime?agent_id=agent_O36EoXzO05qHiXHr`;
+  const xaiUrl = `wss://api.x.ai/v1/realtime?model=grok-voice-latest`;
   let xaiWs;
   try {
     xaiWs = new WsClient(xaiUrl, { headers: { Authorization: `Bearer ${XAI_KEY}` } });

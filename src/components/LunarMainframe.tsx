@@ -163,55 +163,59 @@ async function fetchXVStream(videoPageUrl: string): Promise<{ streamUrl: string 
 }
 
 // ─── HLS-capable video player ─────────────────────────────────────────────────
-function HlsVideoPlayer({ url, title }: { url: string; title: string }) {
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const hlsRef = useRef<Hls | null>(null)
-  const [error, setError] = useState(false)
+const HlsVideoPlayer = forwardRef<HTMLVideoElement, { url: string; title: string }>(
+  function HlsVideoPlayer({ url, title }, ref) {
+    const internalRef = useRef<HTMLVideoElement>(null)
+    // Use forwarded ref if provided, otherwise fall back to internal
+    const videoRef = (ref as React.RefObject<HTMLVideoElement>) ?? internalRef
+    const hlsRef = useRef<Hls | null>(null)
+    const [error, setError] = useState(false)
 
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video || !url) return
-    setError(false)
+    useEffect(() => {
+      const video = videoRef.current
+      if (!video || !url) return
+      setError(false)
 
-    const isM3u8 = url.includes('.m3u8') || url.includes('/stream')
-    if (isM3u8) {
-      if (Hls.isSupported()) {
-        const hls = new Hls({ maxBufferLength: 30, enableWorker: false })
-        hlsRef.current = hls
-        hls.loadSource(url)
-        hls.attachMedia(video)
-        hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(() => {}) })
-        hls.on(Hls.Events.ERROR, (_ev, data) => { if (data.fatal) setError(true) })
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      const isM3u8 = url.includes('.m3u8') || url.includes('/stream')
+      if (isM3u8) {
+        if (Hls.isSupported()) {
+          const hls = new Hls({ maxBufferLength: 30, enableWorker: false })
+          hlsRef.current = hls
+          hls.loadSource(url)
+          hls.attachMedia(video)
+          hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(() => {}) })
+          hls.on(Hls.Events.ERROR, (_ev, data) => { if (data.fatal) setError(true) })
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = url
+          video.play().catch(() => {})
+        } else {
+          setError(true)
+        }
+      } else {
         video.src = url
         video.play().catch(() => {})
-      } else {
-        setError(true)
       }
-    } else {
-      video.src = url
-      video.play().catch(() => {})
-    }
 
-    return () => { hlsRef.current?.destroy(); hlsRef.current = null }
-  }, [url])
+      return () => { hlsRef.current?.destroy(); hlsRef.current = null }
+    }, [url])
 
-  if (error) return (
-    <div className="w-full h-full flex flex-col items-center justify-center gap-2"
-      style={{ background: 'rgba(0,0,0,0.8)' }}>
-      <span style={{ color: 'rgba(168,85,247,0.5)', fontSize: 24 }}>⚠</span>
-      <p className="text-[8px] tracking-widest uppercase text-center px-3" style={{ color: 'rgba(255,255,255,0.3)' }}>
-        Stream unavailable.<br />Try another query.
-      </p>
-    </div>
-  )
+    if (error) return (
+      <div className="w-full h-full flex flex-col items-center justify-center gap-2"
+        style={{ background: 'rgba(0,0,0,0.8)' }}>
+        <span style={{ color: 'rgba(168,85,247,0.5)', fontSize: 24 }}>⚠</span>
+        <p className="text-[8px] tracking-widest uppercase text-center px-3" style={{ color: 'rgba(255,255,255,0.3)' }}>
+          Stream unavailable.<br />Try another query.
+        </p>
+      </div>
+    )
 
-  return (
-    <video ref={videoRef} className="w-full h-full object-contain" controls autoPlay playsInline
-      style={{ background: '#000' }}
-      title={title} />
-  )
-}
+    return (
+      <video ref={videoRef} className="w-full h-full object-contain" controls autoPlay playsInline
+        style={{ background: '#000' }}
+        title={title} />
+    )
+  }
+)
 
 // ─── Analysis trigger detection ───────────────────────────────────────────────
 const ANALYSIS_TRIGGERS = ['analyz','analys','describe','what do you see','what is this',"what's this",'look at this','inspect','tell me about this','examine','what am i looking at','explain this']
@@ -302,9 +306,9 @@ function BranchVideoPlayer({ embed, onClose }: { embed: { url: string; title: st
               <X size={10} style={{ color: 'white' }} />
             </button>
           </div>
-          {/* HLS video player */}
+          {/* HLS video player — ref forwarded so pause/resume events control it */}
           <div className="relative bg-black" style={{ aspectRatio: '16/9' }}>
-            <HlsVideoPlayer url={embed.url} title={embed.title} />
+            <HlsVideoPlayer ref={videoRef} url={embed.url} title={embed.title} />
             {/* Corner accents */}
             {[
               { top: 4, left: 4, borderTop: '1px solid rgba(168,85,247,0.4)', borderLeft: '1px solid rgba(168,85,247,0.4)' },
